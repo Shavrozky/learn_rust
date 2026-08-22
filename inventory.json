@@ -1,0 +1,11 @@
+{
+  "items": [
+    {
+      "id": 1,
+      "name": "Nata",
+      "price": 15000.0,
+      "stock": 1
+    }
+  ],
+  "next_id": 2
+}
