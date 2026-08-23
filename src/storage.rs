@@ -20,18 +20,16 @@ pub struct DbStorage {
 impl DbStorage {
     pub fn new(db_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let db = Database::create(db_path)?;
-        
         let write_txn = db.begin_write()?;
         {
             let _ = write_txn.open_table(TABLE)?;
         }
         write_txn.commit()?;
-
         Ok(DbStorage { db })
     }
 
-    // CREATE: Tambah item baru
-    pub fn add_item(&self, name: String, price: f64, stock: u32) -> Result<u32, Box<dyn std::error::Error>> {
+    // CREATE: Mengembalikan data Item yang baru dibuat
+    pub fn add_item(&self, name: String, price: f64, stock: u32) -> Result<Item, Box<dyn std::error::Error>> {
         let items = self.list_items()?;
         let next_id = items.iter().map(|i| i.id).max().unwrap_or(0) + 1;
 
@@ -45,10 +43,10 @@ impl DbStorage {
         }
         write_txn.commit()?;
 
-        Ok(next_id)
+        Ok(item)
     }
 
-    // READ ALL: Mengambil seluruh data
+    // READ ALL: Mengambil seluruh array barang
     pub fn list_items(&self) -> Result<Vec<Item>, Box<dyn std::error::Error>> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(TABLE)?;
@@ -64,43 +62,38 @@ impl DbStorage {
         Ok(items)
     }
 
-    // UPDATE: Update harga dan stok (Borrow guard di-drop sebelum insert)
-    pub fn update_item(&self, id: u32, new_price: Option<f64>, new_stock: Option<u32>) -> Result<bool, Box<dyn std::error::Error>> {
+    // UPDATE: Mengembalikan Option<Item> yang sudah diperbarui
+    pub fn update_item(&self, id: u32, new_price: Option<f64>, new_stock: Option<u32>) -> Result<Option<Item>, Box<dyn std::error::Error>> {
         let write_txn = self.db.begin_write()?;
         let mut table = write_txn.open_table(TABLE)?;
 
-        // 1. Ekstrak data JSON ke struct (peminjaman 'val' selesai di blok ini)
         let item_opt: Option<Item> = if let Some(val) = table.get(id)? {
             Some(serde_json::from_str(val.value())?)
         } else {
             None
         };
 
-        // 2. Modifikasi dan simpan kembali
         if let Some(mut item) = item_opt {
             if let Some(p) = new_price { item.price = p; }
             if let Some(s) = new_stock { item.stock = s; }
 
             let serialized = serde_json::to_string(&item)?;
             table.insert(id, serialized.as_str())?;
-            
-            // Drop pinjaman table sebelum commit transaksi
             drop(table);
             write_txn.commit()?;
-            Ok(true)
+            Ok(Some(item))
         } else {
             drop(table);
-            Ok(false)
+            Ok(None)
         }
     }
 
-    // DELETE: Hapus item berdasarkan ID
+    // DELETE: Menghapus data
     pub fn delete_item(&self, id: u32) -> Result<bool, Box<dyn std::error::Error>> {
         let write_txn = self.db.begin_write()?;
         let mut table = write_txn.open_table(TABLE)?;
-        
         let removed = table.remove(id)?.is_some();
-        drop(table); // Lepaskan borrow table
+        drop(table);
 
         if removed {
             write_txn.commit()?;

@@ -2,114 +2,94 @@
 
 mod storage;
 
-use std::io::{self, Write};
-use storage::DbStorage;
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    routing::{get, put},
+    Json, Router,
+};
+use serde::Deserialize;
+use std::sync::{Arc, Mutex};
+use storage::{DbStorage, Item};
 
-const DB_FILE: &str = "inventory.redb";
+// Type alias untuk Shared State lintas thread
+type AppState = Arc<Mutex<DbStorage>>;
 
-fn read_input(prompt: &str) -> String {
-    print!("{}", prompt);
-    io::stdout().flush().unwrap();
-
-    let mut buffer = String::new();
-    io::stdin().read_line(&mut buffer).expect("Gagal membaca input");
-    buffer.trim().to_string()
+// Payload DTO (Data Transfer Object)
+#[derive(Deserialize)]
+struct CreateItemPayload {
+    name: String,
+    price: f64,
+    stock: u32,
 }
 
-fn main() {
-    let db = match DbStorage::new(DB_FILE) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("Gagal menginisialisasi Database: {}", e);
-            return;
-        }
-    };
+#[derive(Deserialize)]
+struct UpdateItemPayload {
+    price: Option<f64>,
+    stock: Option<u32>,
+}
 
-    loop {
-        println!("\n=== APLIKASI INVENTARIS CRUD (PURE RUST DB) ===");
-        println!("1. Lihat Semua Barang (Read)");
-        println!("2. Tambah Barang Baru (Create)");
-        println!("3. Update Stok / Harga (Update)");
-        println!("4. Hapus Barang (Delete)");
-        println!("5. Keluar");
+#[tokio::main]
+async fn main() {
+    let db = DbStorage::new("inventory.redb").expect("Gagal inisialisasi Database");
+    let state: AppState = Arc::new(Mutex::new(db));
 
-        let choice = read_input("Pilih menu [1-5]: ");
+    let app = Router::new()
+        .route("/items", get(get_items).post(create_item))
+        .route("/items/:id", put(update_item).delete(delete_item))
+        .with_state(state);
 
-        match choice.as_str() {
-            "1" => {
-                println!("\n--- DAFTAR BARANG ---");
-                match db.list_items() {
-                    Ok(items) if items.is_empty() => println!("(Database kosong)"),
-                    Ok(items) => {
-                        for item in items {
-                            println!(
-                                "ID: {} | Nama: {} | Harga: Rp{:.2} | Stok: {}",
-                                item.id, item.name, item.price, item.stock
-                            );
-                        }
-                    }
-                    Err(e) => println!("Gagal membaca data: {}", e),
-                }
-            }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+        .await
+        .unwrap();
 
-            "2" => {
-                println!("\n--- TAMBAH BARANG ---");
-                let name = read_input("Nama Barang: ");
-                let price: f64 = match read_input("Harga: ").parse() {
-                    Ok(v) => v,
-                    Err(_) => { println!("Harga tidak valid!"); continue; }
-                };
-                let stock: u32 = match read_input("Stok: ").parse() {
-                    Ok(v) => v,
-                    Err(_) => { println!("Stok tidak valid!"); continue; }
-                };
+    println!("Server REST API berjalan di http://127.0.0.1:3000");
 
-                match db.add_item(name, price, stock) {
-                    Ok(new_id) => println!("Sukses menambahkan barang dengan ID: {}", new_id),
-                    Err(e) => println!("Gagal insert ke DB: {}", e),
-                }
-            }
+    axum::serve(listener, app).await.unwrap();
+}
 
-            "3" => {
-                println!("\n--- UPDATE BARANG ---");
-                let id: u32 = match read_input("ID Barang: ").parse() {
-                    Ok(v) => v,
-                    Err(_) => { println!("ID tidak valid!"); continue; }
-                };
+// 1. GET /items
+async fn get_items(State(state): State<AppState>) -> Result<Json<Vec<Item>>, (StatusCode, String)> {
+    let db = state.lock().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let items = db.list_items().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(items))
+}
 
-                let p_str = read_input("Harga Baru (Enter jika tidak diubah): ");
-                let new_price = if p_str.is_empty() { None } else { p_str.parse().ok() };
+// 2. POST /items
+async fn create_item(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateItemPayload>,
+) -> Result<(StatusCode, Json<Item>), (StatusCode, String)> {
+    let db = state.lock().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let item = db
+        .add_item(payload.name, payload.price, payload.stock)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok((StatusCode::CREATED, Json(item)))
+}
 
-                let s_str = read_input("Stok Baru (Enter jika tidak diubah): ");
-                let new_stock = if s_str.is_empty() { None } else { s_str.parse().ok() };
+// 3. PUT /items/:id
+async fn update_item(
+    Path(id): Path<u32>,
+    State(state): State<AppState>,
+    Json(payload): Json<UpdateItemPayload>,
+) -> Result<Json<Item>, (StatusCode, String)> {
+    let db = state.lock().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    match db.update_item(id, payload.price, payload.stock) {
+        Ok(Some(item)) => Ok(Json(item)),
+        Ok(None) => Err((StatusCode::NOT_FOUND, format!("ID {} tidak ditemukan", id))),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
 
-                match db.update_item(id, new_price, new_stock) {
-                    Ok(true) => println!("Barang ID {} berhasil diperbarui!", id),
-                    Ok(false) => println!("Barang ID {} tidak ditemukan.", id),
-                    Err(e) => println!("Gagal update: {}", e),
-                }
-            }
-
-            "4" => {
-                println!("\n--- HAPUS BARANG ---");
-                let id: u32 = match read_input("ID Barang yang ingin dihapus: ").parse() {
-                    Ok(v) => v,
-                    Err(_) => { println!("ID tidak valid!"); continue; }
-                };
-
-                match db.delete_item(id) {
-                    Ok(true) => println!("Barang ID {} berhasil dihapus.", id),
-                    Ok(false) => println!("Barang ID {} tidak ditemukan.", id),
-                    Err(e) => println!("Gagal menghapus: {}", e),
-                }
-            }
-
-            "5" => {
-                println!("Aplikasi ditutup. Data tersimpan di '{}'.", DB_FILE);
-                break;
-            }
-
-            _ => println!("Pilihan tidak valid, silakan coba lagi."),
-        }
+// 4. DELETE /items/:id
+async fn delete_item(
+    Path(id): Path<u32>,
+    State(state): State<AppState>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let db = state.lock().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    match db.delete_item(id) {
+        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(false) => Err((StatusCode::NOT_FOUND, format!("ID {} tidak ditemukan", id))),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
 }
