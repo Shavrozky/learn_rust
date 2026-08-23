@@ -2,14 +2,19 @@
 
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 const TABLE: TableDefinition<u32, &str> = TableDefinition::new("inventory");
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Item {
+    #[schema(example = 1)]
     pub id: u32,
+    #[schema(example = "Keyboard Mechanical RGB")]
     pub name: String,
+    #[schema(example = 850000.0)]
     pub price: f64,
+    #[schema(example = 12)]
     pub stock: u32,
 }
 
@@ -28,7 +33,6 @@ impl DbStorage {
         Ok(DbStorage { db })
     }
 
-    // CREATE: Mengembalikan data Item yang baru dibuat
     pub fn add_item(&self, name: String, price: f64, stock: u32) -> Result<Item, Box<dyn std::error::Error>> {
         let items = self.list_items()?;
         let next_id = items.iter().map(|i| i.id).max().unwrap_or(0) + 1;
@@ -46,7 +50,6 @@ impl DbStorage {
         Ok(item)
     }
 
-    // READ ALL: Mengambil seluruh array barang
     pub fn list_items(&self) -> Result<Vec<Item>, Box<dyn std::error::Error>> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(TABLE)?;
@@ -62,7 +65,6 @@ impl DbStorage {
         Ok(items)
     }
 
-    // UPDATE: Mengembalikan Option<Item> yang sudah diperbarui
     pub fn update_item(&self, id: u32, new_price: Option<f64>, new_stock: Option<u32>) -> Result<Option<Item>, Box<dyn std::error::Error>> {
         let write_txn = self.db.begin_write()?;
         let mut table = write_txn.open_table(TABLE)?;
@@ -88,7 +90,6 @@ impl DbStorage {
         }
     }
 
-    // DELETE: Menghapus data
     pub fn delete_item(&self, id: u32) -> Result<bool, Box<dyn std::error::Error>> {
         let write_txn = self.db.begin_write()?;
         let mut table = write_txn.open_table(TABLE)?;
