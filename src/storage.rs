@@ -1,9 +1,9 @@
 // File: src/storage.rs
 
+use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
-use std::io::{BufReader, BufWriter};
-use std::path::Path;
+
+const TABLE: TableDefinition<u32, &str> = TableDefinition::new("inventory");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Item {
@@ -13,75 +13,98 @@ pub struct Item {
     pub stock: u32,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct Inventory {
-    items: Vec<Item>,
-    next_id: u32,
+pub struct DbStorage {
+    db: Database,
 }
 
-impl Inventory {
-    // 1. Muat data dari file JSON (jika file belum ada, buat Inventory kosong)
-    pub fn load_from_file(file_path: &str) -> Self {
-        if !Path::new(file_path).exists() {
-            return Inventory {
-                items: Vec::new(),
-                next_id: 1,
-            };
+impl DbStorage {
+    pub fn new(db_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let db = Database::create(db_path)?;
+        
+        let write_txn = db.begin_write()?;
+        {
+            let _ = write_txn.open_table(TABLE)?;
+        }
+        write_txn.commit()?;
+
+        Ok(DbStorage { db })
+    }
+
+    // CREATE: Tambah item baru
+    pub fn add_item(&self, name: String, price: f64, stock: u32) -> Result<u32, Box<dyn std::error::Error>> {
+        let items = self.list_items()?;
+        let next_id = items.iter().map(|i| i.id).max().unwrap_or(0) + 1;
+
+        let item = Item { id: next_id, name, price, stock };
+        let json_data = serde_json::to_string(&item)?;
+
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(TABLE)?;
+            table.insert(next_id, json_data.as_str())?;
+        }
+        write_txn.commit()?;
+
+        Ok(next_id)
+    }
+
+    // READ ALL: Mengambil seluruh data
+    pub fn list_items(&self) -> Result<Vec<Item>, Box<dyn std::error::Error>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(TABLE)?;
+        
+        let mut items = Vec::new();
+        for result in table.iter()? {
+            let (_, value) = result?;
+            let item: Item = serde_json::from_str(value.value())?;
+            items.push(item);
         }
 
-        let file = match File::open(file_path) {
-            Ok(f) => f,
-            Err(_) => return Inventory { items: Vec::new(), next_id: 1 },
+        items.sort_by_key(|i| i.id);
+        Ok(items)
+    }
+
+    // UPDATE: Update harga dan stok (Borrow guard di-drop sebelum insert)
+    pub fn update_item(&self, id: u32, new_price: Option<f64>, new_stock: Option<u32>) -> Result<bool, Box<dyn std::error::Error>> {
+        let write_txn = self.db.begin_write()?;
+        let mut table = write_txn.open_table(TABLE)?;
+
+        // 1. Ekstrak data JSON ke struct (peminjaman 'val' selesai di blok ini)
+        let item_opt: Option<Item> = if let Some(val) = table.get(id)? {
+            Some(serde_json::from_str(val.value())?)
+        } else {
+            None
         };
 
-        let reader = BufReader::new(file);
-        serde_json::from_reader(reader).unwrap_or_else(|_| Inventory {
-            items: Vec::new(),
-            next_id: 1,
-        })
-    }
-
-    // 2. Simpan seluruh data state ke file JSON
-    pub fn save_to_file(&self, file_path: &str) -> Result<(), String> {
-        let file = File::create(file_path).map_err(|e| e.to_string())?;
-        let writer = BufWriter::new(file);
-
-        // Menulis JSON dengan format rapi (pretty print)
-        serde_json::to_writer_pretty(writer, self).map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    // CREATE
-    pub fn add_item(&mut self, name: String, price: f64, stock: u32) -> u32 {
-        let id = self.next_id;
-        let item = Item { id, name, price, stock };
-        self.items.push(item);
-        self.next_id += 1;
-        id
-    }
-
-    // READ ALL
-    pub fn list_items(&self) -> &[Item] {
-        &self.items
-    }
-
-    // UPDATE
-    pub fn update_item(&mut self, id: u32, new_price: Option<f64>, new_stock: Option<u32>) -> Result<(), String> {
-        if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
+        // 2. Modifikasi dan simpan kembali
+        if let Some(mut item) = item_opt {
             if let Some(p) = new_price { item.price = p; }
             if let Some(s) = new_stock { item.stock = s; }
-            Ok(())
+
+            let serialized = serde_json::to_string(&item)?;
+            table.insert(id, serialized.as_str())?;
+            
+            // Drop pinjaman table sebelum commit transaksi
+            drop(table);
+            write_txn.commit()?;
+            Ok(true)
         } else {
-            Err(format!("Item dengan ID {} tidak ditemukan.", id))
+            drop(table);
+            Ok(false)
         }
     }
 
-    // DELETE
-    pub fn delete_item(&mut self, id: u32) -> Result<Item, String> {
-        if let Some(index) = self.items.iter().position(|item| item.id == id) {
-            Ok(self.items.remove(index))
-        } else {
-            Err(format!("Gagal menghapus: ID {} tidak ditemukan.", id))
+    // DELETE: Hapus item berdasarkan ID
+    pub fn delete_item(&self, id: u32) -> Result<bool, Box<dyn std::error::Error>> {
+        let write_txn = self.db.begin_write()?;
+        let mut table = write_txn.open_table(TABLE)?;
+        
+        let removed = table.remove(id)?.is_some();
+        drop(table); // Lepaskan borrow table
+
+        if removed {
+            write_txn.commit()?;
         }
+        Ok(removed)
     }
 }

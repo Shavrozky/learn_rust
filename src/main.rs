@@ -3,9 +3,9 @@
 mod storage;
 
 use std::io::{self, Write};
-use storage::Inventory;
+use storage::DbStorage;
 
-const DATA_FILE: &str = "inventory.json";
+const DB_FILE: &str = "inventory.redb";
 
 fn read_input(prompt: &str) -> String {
     print!("{}", prompt);
@@ -17,32 +17,38 @@ fn read_input(prompt: &str) -> String {
 }
 
 fn main() {
-    // Muat data lama dari file JSON (jika ada) saat aplikasi dibuka
-    let mut inventory = Inventory::load_from_file(DATA_FILE);
+    let db = match DbStorage::new(DB_FILE) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Gagal menginisialisasi Database: {}", e);
+            return;
+        }
+    };
 
     loop {
-        println!("\n=== APLIKASI INVENTARIS CRUD (JSON PERSISTENT) ===");
-        println!("1. Lihat Semua Barang");
-        println!("2. Tambah Barang Baru");
-        println!("3. Update Stok / Harga");
-        println!("4. Hapus Barang");
-        println!("5. Simpan & Keluar");
+        println!("\n=== APLIKASI INVENTARIS CRUD (PURE RUST DB) ===");
+        println!("1. Lihat Semua Barang (Read)");
+        println!("2. Tambah Barang Baru (Create)");
+        println!("3. Update Stok / Harga (Update)");
+        println!("4. Hapus Barang (Delete)");
+        println!("5. Keluar");
 
         let choice = read_input("Pilih menu [1-5]: ");
 
         match choice.as_str() {
             "1" => {
                 println!("\n--- DAFTAR BARANG ---");
-                let items = inventory.list_items();
-                if items.is_empty() {
-                    println!("(Inventaris kosong)");
-                } else {
-                    for item in items {
-                        println!(
-                            "ID: {} | Nama: {} | Harga: Rp{:.2} | Stok: {}",
-                            item.id, item.name, item.price, item.stock
-                        );
+                match db.list_items() {
+                    Ok(items) if items.is_empty() => println!("(Database kosong)"),
+                    Ok(items) => {
+                        for item in items {
+                            println!(
+                                "ID: {} | Nama: {} | Harga: Rp{:.2} | Stok: {}",
+                                item.id, item.name, item.price, item.stock
+                            );
+                        }
                     }
+                    Err(e) => println!("Gagal membaca data: {}", e),
                 }
             }
 
@@ -58,10 +64,10 @@ fn main() {
                     Err(_) => { println!("Stok tidak valid!"); continue; }
                 };
 
-                let id = inventory.add_item(name, price, stock);
-                // Simpan otomatis ke file setiap ada penambahan
-                let _ = inventory.save_to_file(DATA_FILE);
-                println!("Sukses menambahkan barang dengan ID: {}", id);
+                match db.add_item(name, price, stock) {
+                    Ok(new_id) => println!("Sukses menambahkan barang dengan ID: {}", new_id),
+                    Err(e) => println!("Gagal insert ke DB: {}", e),
+                }
             }
 
             "3" => {
@@ -77,12 +83,10 @@ fn main() {
                 let s_str = read_input("Stok Baru (Enter jika tidak diubah): ");
                 let new_stock = if s_str.is_empty() { None } else { s_str.parse().ok() };
 
-                match inventory.update_item(id, new_price, new_stock) {
-                    Ok(_) => {
-                        let _ = inventory.save_to_file(DATA_FILE);
-                        println!("Barang ID {} berhasil diperbarui!", id);
-                    }
-                    Err(e) => println!("Error: {}", e),
+                match db.update_item(id, new_price, new_stock) {
+                    Ok(true) => println!("Barang ID {} berhasil diperbarui!", id),
+                    Ok(false) => println!("Barang ID {} tidak ditemukan.", id),
+                    Err(e) => println!("Gagal update: {}", e),
                 }
             }
 
@@ -93,21 +97,15 @@ fn main() {
                     Err(_) => { println!("ID tidak valid!"); continue; }
                 };
 
-                match inventory.delete_item(id) {
-                    Ok(item) => {
-                        let _ = inventory.save_to_file(DATA_FILE);
-                        println!("Barang '{}' (ID: {}) berhasil dihapus.", item.name, item.id);
-                    }
-                    Err(e) => println!("Error: {}", e),
+                match db.delete_item(id) {
+                    Ok(true) => println!("Barang ID {} berhasil dihapus.", id),
+                    Ok(false) => println!("Barang ID {} tidak ditemukan.", id),
+                    Err(e) => println!("Gagal menghapus: {}", e),
                 }
             }
 
             "5" => {
-                if let Err(e) = inventory.save_to_file(DATA_FILE) {
-                    eprintln!("Gagal menyimpan data: {}", e);
-                } else {
-                    println!("Data berhasil disimpan ke '{}'. Sampai jumpa!", DATA_FILE);
-                }
+                println!("Aplikasi ditutup. Data tersimpan di '{}'.", DB_FILE);
                 break;
             }
 
