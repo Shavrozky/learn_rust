@@ -22,3 +22,8 @@ Thumbs.db
 # Environment variables
 .env
 .env.*
+
+/target/
+/frontend/dist/
+.env
+*.redb
