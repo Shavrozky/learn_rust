@@ -9,7 +9,7 @@ members = [
 ]
 
 [dependencies]
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1.0", features = ["full"] }
 redb = "2.1"
 serde = { version = "1.0", features = ["derive"] }

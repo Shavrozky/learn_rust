@@ -1,8 +1,11 @@
 use gloo_net::http::Request;
 use leptos::*;
 use serde::{Deserialize, Serialize};
+use wasm_bindgen::prelude::*;
+use web_sys::{MessageEvent, WebSocket};
 
-const API_BASE: &str = "http://127.0.0.1:3000/items";
+const API_BASE: &str = "http://127.0.0.1:3030/items";
+const WS_URL: &str = "ws://127.0.0.1:3030/ws";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Item {
@@ -23,7 +26,24 @@ struct CreateItemPayload {
 fn App() -> impl IntoView {
     let (trigger, set_trigger) = create_signal(0);
 
-    // Fetch data items dari backend Axum
+    // ==========================================
+    // 1. BUKA KONEKSI WEBSOCKET KE SERVER
+    // ==========================================
+    if let Ok(ws) = WebSocket::new(WS_URL) {
+        let onmessage_callback = Closure::<dyn FnMut(_)>::new(move |e: MessageEvent| {
+            // Jika ada pesan teks yang masuk via WS dari Server
+            if let Ok(txt) = e.data().dyn_into::<js_sys::JsString>() {
+                if txt == "REFRESH" {
+                    // Paksa Leptos untuk melakukan fetching ulang ke API!
+                    set_trigger.update(|n| *n += 1);
+                }
+            }
+        });
+        ws.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
+        onmessage_callback.forget();
+    }
+
+    // 2. Resource ini otomatis terpanggil jika 'trigger' berubah nilainya
     let items_resource = create_resource(
         move || trigger.get(),
         |_| async move {
@@ -37,12 +57,10 @@ fn App() -> impl IntoView {
         },
     );
 
-    // Node references untuk form input
     let name_ref = create_node_ref::<html::Input>();
     let price_ref = create_node_ref::<html::Input>();
     let stock_ref = create_node_ref::<html::Input>();
 
-    // Handler Tambah Barang
     let on_submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
         let name = name_ref.get().unwrap().value();
@@ -50,32 +68,24 @@ fn App() -> impl IntoView {
         let stock: u32 = stock_ref.get().unwrap().value().parse().unwrap_or(0);
 
         if name.is_empty() { return; }
-
         let payload = CreateItemPayload { name, price, stock };
 
         wasm_bindgen_futures::spawn_local(async move {
-            let _ = Request::post(API_BASE)
-                .json(&payload)
-                .unwrap()
-                .send()
-                .await;
-            
-            // Refresh data tabel
-            set_trigger.update(|n| *n += 1);
+            let _ = Request::post(API_BASE).json(&payload).unwrap().send().await;
+            // Dihapus: set_trigger.update(...) 
+            // Karena sekarang WebSocket yang akan menyuruh tabel ini refresh secara otomatis!
         });
 
-        // Reset form input
         name_ref.get().unwrap().set_value("");
         price_ref.get().unwrap().set_value("");
         stock_ref.get().unwrap().set_value("");
     };
 
-    // Handler Hapus Barang
     let delete_item = move |id: u32| {
         wasm_bindgen_futures::spawn_local(async move {
             let url = format!("{}/{}", API_BASE, id);
             let _ = Request::delete(&url).send().await;
-            set_trigger.update(|n| *n += 1);
+            // Dihapus: set_trigger.update(...) 
         });
     };
 
