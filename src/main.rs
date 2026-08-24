@@ -11,6 +11,7 @@ use axum::{
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use storage::{DbStorage, Item};
+use tower_http::cors::{Any, CorsLayer};
 use utoipa::{OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -61,10 +62,16 @@ async fn main() {
     let db = DbStorage::new("inventory.redb").expect("Gagal inisialisasi Database");
     let state: AppState = Arc::new(Mutex::new(db));
 
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     let app = Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .route("/items", get(get_items).post(create_item))
         .route("/items/:id", put(update_item).delete(delete_item))
+        .layer(cors)
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
