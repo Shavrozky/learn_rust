@@ -3,15 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rust WASM Inventory Dashboard</title>
+    <title>Rust Inventory Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
-<link rel="modulepreload" href="/frontend-26218b9294ab828b.js" crossorigin="anonymous" integrity="sha384-ZX3aX9PwlmnACnyo9GZMyRKp284GUbgKp74w3tSyvkg3lIGQH6iLyx+VKRooLRZ0"><link rel="preload" href="/frontend-26218b9294ab828b_bg.wasm" crossorigin="anonymous" integrity="sha384-HZSxtZV3XWJuhQGl9kd0vC0Ycwif6Yb3K4MOQAFV+7Sgci5D6rMP13dbW6VvJ7uv" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/frontend-a310379657e93438.js" crossorigin="anonymous" integrity="sha384-kl303shFw8h4utkonaa8Ss1Dn14d8PIMpGi/3TEjOqGtAtRYvYpSbRnSDTmorw7Q"><link rel="preload" href="/frontend-a310379657e93438_bg.wasm" crossorigin="anonymous" integrity="sha384-tKQhLxfAXi2G/GvVN5O/iTPsr/lCNaD+IoDT8sRHfibPF67ODAwotmsTGyxxJr4u" as="fetch" type="application/wasm"></head>
 <body class="bg-gray-50 text-gray-800">
     <div id="root"></div>
 
 <script type="module">
-import init, * as bindings from '/frontend-26218b9294ab828b.js';
-const wasm = await init({ module_or_path: '/frontend-26218b9294ab828b_bg.wasm' });
+import init, * as bindings from '/frontend-a310379657e93438.js';
+const wasm = await init({ module_or_path: '/frontend-a310379657e93438_bg.wasm' });
 
 
 window.wasmBindings = bindings;

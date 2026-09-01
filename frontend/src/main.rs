@@ -27,14 +27,12 @@ fn App() -> impl IntoView {
     let (trigger, set_trigger) = create_signal(0);
 
     // ==========================================
-    // 1. BUKA KONEKSI WEBSOCKET KE SERVER
+    // 1. WEBSOCKET LISTENER
     // ==========================================
     if let Ok(ws) = WebSocket::new(WS_URL) {
         let onmessage_callback = Closure::<dyn FnMut(_)>::new(move |e: MessageEvent| {
-            // Jika ada pesan teks yang masuk via WS dari Server
             if let Ok(txt) = e.data().dyn_into::<js_sys::JsString>() {
                 if txt == "REFRESH" {
-                    // Paksa Leptos untuk melakukan fetching ulang ke API!
                     set_trigger.update(|n| *n += 1);
                 }
             }
@@ -43,7 +41,9 @@ fn App() -> impl IntoView {
         onmessage_callback.forget();
     }
 
-    // 2. Resource ini otomatis terpanggil jika 'trigger' berubah nilainya
+    // ==========================================
+    // 2. RESOURCE DATA
+    // ==========================================
     let items_resource = create_resource(
         move || trigger.get(),
         |_| async move {
@@ -57,10 +57,16 @@ fn App() -> impl IntoView {
         },
     );
 
+    // ==========================================
+    // 3. DEKLARASI REFERENSI NODE HTML
+    // ==========================================
     let name_ref = create_node_ref::<html::Input>();
     let price_ref = create_node_ref::<html::Input>();
     let stock_ref = create_node_ref::<html::Input>();
 
+    // ==========================================
+    // 4. HANDLER FUNGSI
+    // ==========================================
     let on_submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
         let name = name_ref.get().unwrap().value();
@@ -72,8 +78,6 @@ fn App() -> impl IntoView {
 
         wasm_bindgen_futures::spawn_local(async move {
             let _ = Request::post(API_BASE).json(&payload).unwrap().send().await;
-            // Dihapus: set_trigger.update(...) 
-            // Karena sekarang WebSocket yang akan menyuruh tabel ini refresh secara otomatis!
         });
 
         name_ref.get().unwrap().set_value("");
@@ -85,10 +89,12 @@ fn App() -> impl IntoView {
         wasm_bindgen_futures::spawn_local(async move {
             let url = format!("{}/{}", API_BASE, id);
             let _ = Request::delete(&url).send().await;
-            // Dihapus: set_trigger.update(...) 
         });
     };
 
+    // ==========================================
+    // 5. TAMPILAN UI (VIEW)
+    // ==========================================
     view! {
         <main class="max-w-4xl mx-auto p-6">
             <header class="mb-8 border-b pb-4">
@@ -96,9 +102,9 @@ fn App() -> impl IntoView {
                 <p class="text-gray-500 mt-1">"Dashboard Inventaris Client-Side Rendered dengan Leptos & Axum"</p>
             </header>
 
-            // Form Tambah Barang
+            // Form Tambah Barang Manual
             <section class="bg-white p-6 rounded-lg shadow-sm border border-gray-200 mb-8">
-                <h2 class="text-lg font-semibold text-gray-700 mb-4">"Tambah Barang Baru"</h2>
+                <h2 class="text-lg font-semibold text-gray-700 mb-4">"Tambah Barang Manual"</h2>
                 <form on:submit=on_submit class="grid grid-cols-1 md:grid-cols-4 gap-4">
                     <input 
                         type="text" 
@@ -189,7 +195,7 @@ fn App() -> impl IntoView {
                                         </table>
                                     }.into_view()
                                 },
-                                None => view! { <p class="p-6 text-center text-red-500">"Gagal tersambung ke backend API (Port 3000)."</p> }.into_view()
+                                None => view! { <p class="p-6 text-center text-red-500">"Gagal tersambung ke backend API (Port 3030)."</p> }.into_view()
                             }
                         })
                     }}
