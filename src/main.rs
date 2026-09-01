@@ -5,7 +5,7 @@ mod storage;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        Path, State, DefaultBodyLimit, Multipart,
     },
     http::StatusCode,
     response::IntoResponse,
@@ -52,7 +52,6 @@ struct ApiDoc;
 async fn main() {
     let db = DbStorage::new("inventory.redb").expect("Gagal inisialisasi Database");
     
-    // 2. Buat pipa saluran komunikasi berkapasitas 100 pesan
     let (tx, _rx) = broadcast::channel(100);
 
     let state = AppState {
@@ -69,8 +68,11 @@ async fn main() {
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .route("/items", get(get_items).post(create_item))
         .route("/items/:id", put(update_item).delete(delete_item))
-        .route("/ws", get(ws_handler)) // Endpoint WebSocket
+        .route("/scan", axum::routing::post(scan_item)) // Panggilan ke fungsi di bawah
+        .route("/ws", get(ws_handler))
         .layer(cors)
+        // Batas maksimal 20 MB untuk gambar resolusi tinggi
+        .layer(DefaultBodyLimit::max(20 * 1024 * 1024)) 
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3030").await.unwrap();
@@ -78,12 +80,11 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-// Handler Koneksi Baru WebSocket
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
 
-// Loop untuk mengirim data stream ke satu koneksi Browser
+
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
     let mut rx = state.tx.subscribe();
     while let Ok(msg) = rx.recv().await {
@@ -92,8 +93,6 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         }
     }
 }
-
-// ============ HTTP ENDPOINTS ============
 
 #[utoipa::path(get, path = "/items", tag = "Inventory", responses((status = 200, body = Vec<Item>)))]
 async fn get_items(State(state): State<AppState>) -> Result<Json<Vec<Item>>, (StatusCode, String)> {
@@ -111,7 +110,7 @@ async fn create_item(
     let item = db.add_item(payload.name, payload.price, payload.stock)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     
-    // 3. Broadcast sinyal REFRESH ke semua client via WebSocket
+    // Broadcast sinyal REFRESH ke semua client via WebSocket
     let _ = state.tx.send("REFRESH".to_string());
     
     Ok((StatusCode::CREATED, Json(item)))
@@ -126,7 +125,7 @@ async fn update_item(
     let db = state.db.lock().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     match db.update_item(id, payload.price, payload.stock) {
         Ok(Some(item)) => {
-            let _ = state.tx.send("REFRESH".to_string()); // Broadcast!
+            let _ = state.tx.send("REFRESH".to_string());
             Ok(Json(item))
         },
         Ok(None) => Err((StatusCode::NOT_FOUND, format!("ID {} tidak ditemukan", id))),
@@ -142,10 +141,75 @@ async fn delete_item(
     let db = state.db.lock().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     match db.delete_item(id) {
         Ok(true) => {
-            let _ = state.tx.send("REFRESH".to_string()); // Broadcast!
+            let _ = state.tx.send("REFRESH".to_string());
             Ok(StatusCode::NO_CONTENT)
         },
         Ok(false) => Err((StatusCode::NOT_FOUND, format!("ID {} tidak ditemukan", id))),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
+}
+
+async fn scan_item(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<Item>), (StatusCode, String)> {
+    
+    // 1. Ekstrak file gambar dari request Multipart frontend
+    let mut image_bytes = Vec::new();
+    let mut file_name = String::new();
+    
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name() == Some("image") {
+            file_name = field.file_name().unwrap_or("image.jpg").to_string();
+            let data = field.bytes().await.map_err(|e| {
+                (StatusCode::BAD_REQUEST, format!("Gagal membaca file: {}", e))
+            })?;
+            image_bytes = data.to_vec();
+            break;
+        }
+    }
+
+    if image_bytes.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "File gambar tidak ditemukan".to_string()));
+    }
+
+    // 2. Siapkan HTTP Client (reqwest) untuk memanggil API Python (FastAPI)
+    let client = reqwest::Client::new();
+    
+    // Bungkus bytes menjadi format multipart untuk dikirim ke Python
+    let part = reqwest::multipart::Part::bytes(image_bytes)
+        .file_name(file_name)
+        .mime_str("image/jpeg")
+        .unwrap();
+    let form = reqwest::multipart::Form::new().part("file", part);
+
+    // Kirim ke service Python lokal yang berjalan di port 8000
+    let ocr_response = client
+        .post("http://127.0.0.1:8000/process-image")
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| {
+            (StatusCode::SERVICE_UNAVAILABLE, format!("Service Python OCR mati: {}", e))
+        })?;
+
+    // Asumsi: Python mengembalikan JSON { "extracted_text": "KODE-BARANG-123" }
+    #[derive(serde::Deserialize)]
+    struct OcrResult {
+        extracted_text: String,
+    }
+    
+    let ocr_data: OcrResult = ocr_response.json().await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Format respon Python salah: {}", e))
+    })?;
+
+    // 3. Simpan nama barang (hasil OCR) ke database Redb 
+    let db = state.db.lock().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let new_item = db.add_item(ocr_data.extracted_text, 0.0, 1)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    
+    // 4. Trigger WebSocket agar frontend langsung Refresh
+    let _ = state.tx.send("REFRESH".to_string());
+
+    Ok((StatusCode::CREATED, Json(new_item)))
 }
