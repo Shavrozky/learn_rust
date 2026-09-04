@@ -27,3 +27,17 @@ Thumbs.db
 /frontend/dist/
 .env
 *.redb
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Rust
+target/
+frontend/dist/
+
+# Data / Database
+*.redb
+inventory.json
