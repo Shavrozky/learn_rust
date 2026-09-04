@@ -1,17 +1,18 @@
+from typing import Annotated
+import asyncio
 from fastapi import FastAPI, File, UploadFile
 import uvicorn
-import time
 
 app = FastAPI()
 
 @app.post("/process-image")
-async def process_image(file: UploadFile = File(...)):
+async def process_image(file: Annotated[UploadFile, File()]):
     print(f"Menerima gambar: {file.filename} dari backend Rust!")
     
     image_bytes = await file.read()
     print(f"Ukuran file: {len(image_bytes)} bytes. Memproses OCR...")
     
-    time.sleep(2)
+    await asyncio.sleep(2)
     
     extracted_text = f"BRG-OCR-{file.filename.split('.')[0].upper()}"
     print(f"Hasil ekstraksi: {extracted_text}")

@@ -1,17 +1,16 @@
-// File: src/main.rs
-
 mod storage;
 
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State, DefaultBodyLimit, Multipart,
+        Path, State,
     },
-    http::StatusCode,
+    http::{header, StatusCode, Uri},
     response::IntoResponse,
     routing::{get, put},
     Json, Router,
 };
+use rust_embed::RustEmbed;
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use storage::{DbStorage, Item};
@@ -20,7 +19,10 @@ use tower_http::cors::{Any, CorsLayer};
 use utoipa::{OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 
-// 1. Tambahkan channel Broadcast ke dalam State
+#[derive(RustEmbed)]
+#[folder = "frontend/dist"]
+struct Assets;
+
 #[derive(Clone)]
 struct AppState {
     db: Arc<Mutex<DbStorage>>,
@@ -51,7 +53,6 @@ struct ApiDoc;
 #[tokio::main]
 async fn main() {
     let db = DbStorage::new("inventory.redb").expect("Gagal inisialisasi Database");
-    
     let (tx, _rx) = broadcast::channel(100);
 
     let state = AppState {
@@ -68,28 +69,46 @@ async fn main() {
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .route("/items", get(get_items).post(create_item))
         .route("/items/:id", put(update_item).delete(delete_item))
-        .route("/scan", axum::routing::post(scan_item)) // Panggilan ke fungsi di bawah
         .route("/ws", get(ws_handler))
         .layer(cors)
-        // Batas maksimal 20 MB untuk gambar resolusi tinggi
-        .layer(DefaultBodyLimit::max(20 * 1024 * 1024)) 
-        .with_state(state);
+        .with_state(state)
+        .fallback(static_handler);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3030").await.unwrap();
-    println!("Server REST API & WS berjalan di http://127.0.0.1:3030");
+    println!("Server Single-Binary berjalan di http://127.0.0.1:3030");
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn static_handler(uri: Uri) -> impl IntoResponse {
+    let mut path = uri.path().trim_start_matches('/').to_string();
+    if path.is_empty() {
+        path = "index.html".to_string();
+    }
+
+    match Assets::get(&path) {
+        Some(content) => {
+            let mime = mime_guess::from_path(&path).first_or_octet_stream();
+            ([(header::CONTENT_TYPE, mime.as_ref())], content.data).into_response()
+        }
+        None => {
+            if let Some(index) = Assets::get("index.html") {
+                ([(header::CONTENT_TYPE, "text/html")], index.data).into_response()
+            } else {
+                (StatusCode::NOT_FOUND, "404 Not Found").into_response()
+            }
+        }
+    }
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
 
-
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
     let mut rx = state.tx.subscribe();
     while let Ok(msg) = rx.recv().await {
         if socket.send(Message::Text(msg)).await.is_err() {
-            break; // Jika browser ditutup, hentikan loop
+            break;
         }
     }
 }
@@ -110,9 +129,7 @@ async fn create_item(
     let item = db.add_item(payload.name, payload.price, payload.stock)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     
-    // Broadcast sinyal REFRESH ke semua client via WebSocket
     let _ = state.tx.send("REFRESH".to_string());
-    
     Ok((StatusCode::CREATED, Json(item)))
 }
 
@@ -147,69 +164,4 @@ async fn delete_item(
         Ok(false) => Err((StatusCode::NOT_FOUND, format!("ID {} tidak ditemukan", id))),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
-}
-
-async fn scan_item(
-    State(state): State<AppState>,
-    mut multipart: Multipart,
-) -> Result<(StatusCode, Json<Item>), (StatusCode, String)> {
-    
-    // 1. Ekstrak file gambar dari request Multipart frontend
-    let mut image_bytes = Vec::new();
-    let mut file_name = String::new();
-    
-    while let Ok(Some(field)) = multipart.next_field().await {
-        if field.name() == Some("image") {
-            file_name = field.file_name().unwrap_or("image.jpg").to_string();
-            let data = field.bytes().await.map_err(|e| {
-                (StatusCode::BAD_REQUEST, format!("Gagal membaca file: {}", e))
-            })?;
-            image_bytes = data.to_vec();
-            break;
-        }
-    }
-
-    if image_bytes.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "File gambar tidak ditemukan".to_string()));
-    }
-
-    // 2. Siapkan HTTP Client (reqwest) untuk memanggil API Python (FastAPI)
-    let client = reqwest::Client::new();
-    
-    // Bungkus bytes menjadi format multipart untuk dikirim ke Python
-    let part = reqwest::multipart::Part::bytes(image_bytes)
-        .file_name(file_name)
-        .mime_str("image/jpeg")
-        .unwrap();
-    let form = reqwest::multipart::Form::new().part("file", part);
-
-    // Kirim ke service Python lokal yang berjalan di port 8000
-    let ocr_response = client
-        .post("http://127.0.0.1:8000/process-image")
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| {
-            (StatusCode::SERVICE_UNAVAILABLE, format!("Service Python OCR mati: {}", e))
-        })?;
-
-    // Asumsi: Python mengembalikan JSON { "extracted_text": "KODE-BARANG-123" }
-    #[derive(serde::Deserialize)]
-    struct OcrResult {
-        extracted_text: String,
-    }
-    
-    let ocr_data: OcrResult = ocr_response.json().await.map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("Format respon Python salah: {}", e))
-    })?;
-
-    // 3. Simpan nama barang (hasil OCR) ke database Redb 
-    let db = state.db.lock().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let new_item = db.add_item(ocr_data.extracted_text, 0.0, 1)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    
-    // 4. Trigger WebSocket agar frontend langsung Refresh
-    let _ = state.tx.send("REFRESH".to_string());
-
-    Ok((StatusCode::CREATED, Json(new_item)))
 }
