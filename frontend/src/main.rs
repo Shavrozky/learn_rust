@@ -56,7 +56,6 @@ fn App() -> impl IntoView {
     let (trigger, set_trigger) = create_signal(0);
     let (search_query, set_search_query) = create_signal(String::new());
 
-    // WebSocket auto-refresh (men-trigger reload item dan audit log secara simultan)
     let ws_url = get_ws_url();
     if let Ok(ws) = WebSocket::new(&ws_url) {
         let onmessage_callback = Closure::<dyn FnMut(_)>::new(move |e: MessageEvent| {
